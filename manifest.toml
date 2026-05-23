@@ -71,12 +71,18 @@ pypi_name = "jiter"
 # 0.15.0 is the latest as of 2026-05.  Hard transitive via
 # anthropic and openai (both pin ``jiter<1,>=0.10.0`` /
 # ``jiter<1,>=0.4.0``) — every recent release demands it
-# unconditionally, no pin escape.  Rust + PyO3 + maturin, single
-# pyproject.toml at repo root (workspace exists under crates/
-# but maturin reads root).
+# unconditionally, no pin escape.  Rust + PyO3 + maturin.
+#
+# The repo is a Cargo workspace: root ``pyproject.toml`` is the
+# uv-managed dev project (``name = "jiter-workspace"``) and has
+# no ``[build-system]`` — maturin invoked there fails with
+# ``missing field build-system``.  The actual Python-binding
+# crate lives at ``crates/jiter-python/`` with its own
+# pyproject + Cargo.  Same shape as primp.
 version = "0.15.0"
 upstream = "https://github.com/pydantic/jiter"
 upstream_tag = "v0.15.0"
+subdir = "crates/jiter-python"
 
 [[wheel]]
 name = "rpds-py"
