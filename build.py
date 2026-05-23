@@ -136,8 +136,20 @@ def build_one(
     version = wheel["version"]
     upstream = wheel["upstream"]
     upstream_tag = wheel["upstream_tag"]
+    # Optional ``subdir`` lets us point maturin at a sub-package
+    # inside a monorepo (huggingface/safetensors and
+    # huggingface/tokenizers both keep their Python bindings under
+    # ``bindings/python/``).  Defaults to repo root.
+    subdir = wheel.get("subdir")
 
     source_dir = _checkout_upstream(name, version, upstream, upstream_tag)
+    build_dir = source_dir / subdir if subdir else source_dir
+    if not build_dir.is_dir():
+        raise RuntimeError(
+            f"manifest declares subdir={subdir!r} for {name} but "
+            f"it does not exist under {source_dir}; the upstream "
+            "tag may have moved its Python package."
+        )
     prefix_lib = _stage_chaquopy_prefix(triple, py_full)
 
     env = os.environ.copy()
@@ -191,7 +203,8 @@ def build_one(
         "off",
     ]
     print(f"  cmd:     {' '.join(cmd)}")
-    subprocess.run(cmd, cwd=source_dir, env=env, check=True)
+    print(f"  cwd:     {build_dir}")
+    subprocess.run(cmd, cwd=build_dir, env=env, check=True)
     print(f"=== {name}/{abi} done ===")
 
 
