@@ -1,0 +1,138 @@
+name: Build Android wheels
+
+# Triggers:
+#   * push of a tag matching ``v*``  → build full matrix, upload to release
+#   * manual workflow_dispatch        → build full matrix, upload only as
+#                                        run artifacts (no release attached)
+#
+# Each (wheel × ABI) cell runs on its own runner so a failure in
+# one doesn't block the others.  Cells go through the same
+# ``build.py`` entry the manifest drives, so adding a new package
+# to the manifest only requires extending the ``matrix.wheel``
+# list below — no per-package YAML.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.wheel }} for ${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Add a new wheel to manifest.toml AND extend this list.
+        # When the list grows large enough to be annoying, replace
+        # with a ``discover`` job that reads manifest.toml via
+        # tomllib and emits ``GITHUB_OUTPUT.matrix`` JSON.
+        wheel:
+          - pydantic-core
+        # ABIs from manifest.toml ``abis`` field.  Only the two
+        # ABIs PyO3/maturin-action's Android cross-prefix supports;
+        # armv7 / x86 would need a different build path.
+        abi:
+          - arm64-v8a
+          - x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27c
+
+      - name: Set up Rust toolchain
+        # Maturin's Android cross-compile needs the Rust target
+        # ``<abi>-linux-android`` installed.  ``stable`` is what
+        # KohakuVault uses for the same workflow.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .build-workspace -> target
+
+      - name: Install Python build tooling
+        # maturin >=1.13.3 emits proper PEP 738 ``android_<api>_<abi>``
+        # wheel tags when ``ANDROID_API_VERSION`` is set.  Earlier
+        # versions tagged Android wheels as ``linux_<arch>`` which
+        # Chaquopy rejects.  See:
+        # https://github.com/PyO3/maturin/pull/2992
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'maturin>=1.13.3'
+
+      - name: Build wheel
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          python build.py --wheel "${{ matrix.wheel }}" --abi "${{ matrix.abi }}"
+
+      - name: Verify wheel has android_<api>_<abi> platform tag
+        # Smoke check the wheel filename carries the PEP 738
+        # platform tag (not ``linux_<arch>``).  If maturin's tag
+        # detection regresses this fails the cell loudly here,
+        # not at downstream Chaquopy install time.
+        run: |
+          ls -lh dist/
+          android_whls=$(ls dist/*-android_24_*.whl 2>/dev/null || true)
+          if [ -z "$android_whls" ]; then
+              echo "::error::No android_24_*.whl produced for ${{ matrix.wheel }}/${{ matrix.abi }}"
+              echo "::error::dist/ contents:"
+              ls dist/ || true
+              exit 1
+          fi
+          echo "OK: $android_whls"
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.wheel }}-${{ matrix.abi }}
+          path: dist/*.whl
+          retention-days: 7
+
+  publish:
+    name: Attach wheels to GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: |
+          ls -lh dist/
+          echo "Total wheels: $(ls dist/*.whl | wc -l)"
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.whl
+          fail_on_unmatched_files: true
+          # The release is created by the user when tagging; this
+          # step just uploads assets to the existing release.
+          # ``generate_release_notes: true`` would populate the
+          # changelog from commits — skip for now since the first
+          # release predates any meaningful history.

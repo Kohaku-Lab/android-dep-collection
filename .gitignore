@@ -1,0 +1,16 @@
+# Build outputs
+dist/
+.build-workspace/
+target/
+*.whl
+
+# Python cruft
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Editors
+.idea/
+.vscode/
+*.swp

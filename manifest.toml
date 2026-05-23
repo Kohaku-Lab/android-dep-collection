@@ -1,0 +1,41 @@
+# android-dep-collection — wheel build manifest.
+#
+# Each ``[[wheel]]`` entry says: "fetch this upstream package at
+# this version, cross-compile to all configured Android ABIs,
+# upload the resulting wheels to the release."
+#
+# Add entries by appending a new ``[[wheel]]`` table.  Bump
+# ``version`` to track upstream.  Commit + tag a release; CI does
+# the rest.
+
+# Android API level baked into the wheel platform tag.  24 =
+# Android 7.0, matches Chaquopy's minSdk floor + the
+# ANDROID_API_VERSION env var maturin reads.
+android_api_level = 24
+
+# ABIs we cross-compile for.  PyO3/maturin-action ships
+# Android cross-prefixes for these two; armv7 / x86 aren't in
+# the action's prefix map (and armv7 device share is ~10% and
+# shrinking).
+abis = ["arm64-v8a", "x86_64"]
+
+# Python interpreter to build against.  Chaquopy 13 ships Python
+# 3.13.7; the wheels need to be cp313-compatible.
+python_version = "3.13"
+chaquopy_python_full_version = "3.13.7"
+
+# ─── Wheels to build ───────────────────────────────────────────
+
+[[wheel]]
+name = "pydantic-core"
+# pyproject distribution name uses an underscore.
+pypi_name = "pydantic_core"
+# pydantic-core 2.41.x is what pydantic 2.13.x requires.  When
+# bumping pydantic in KohakuTerrarium, check the corresponding
+# pydantic-core pin in pydantic's pyproject and update here.
+version = "2.41.1"
+# pydantic-core's pyproject sets ``python-source`` and the maturin
+# config is non-trivial.  We invoke maturin directly against the
+# sdist rather than fighting with cargo workspace settings.
+upstream = "https://github.com/pydantic/pydantic-core"
+upstream_tag = "v2.41.1"

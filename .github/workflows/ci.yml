@@ -1,0 +1,65 @@
+name: CI
+
+# PR + main-push smoke test.  Builds ONE wheel for ONE ABI on
+# every change so manifest edits / build.py refactors get caught
+# before tag time.  The full matrix (every wheel × every ABI)
+# runs only on tag push via ``build.yml`` — it's expensive (5-10
+# min per cell, ~10 cells today, growing) and not worth gating
+# every PR on.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: Smoke build (pydantic-core / arm64-v8a)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27c
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .build-workspace -> target
+
+      - name: Install Python build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'maturin>=1.13.3'
+
+      - name: Smoke build
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          python build.py --wheel pydantic-core --abi arm64-v8a
+
+      - name: Verify android_24_arm64_v8a wheel
+        run: |
+          ls -lh dist/
+          test -n "$(ls dist/*-android_24_arm64_v8a.whl 2>/dev/null)" || {
+              echo "::error::No properly-tagged wheel produced"
+              ls dist/ || true
+              exit 1
+          }
