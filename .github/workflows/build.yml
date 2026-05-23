@@ -36,6 +36,8 @@ jobs:
           - safetensors
           - tokenizers
           - primp
+          - jiter
+          - rpds-py
         # ABIs from manifest.toml ``abis`` field.  Only the two
         # ABIs PyO3/maturin-action's Android cross-prefix supports;
         # armv7 / x86 would need a different build path.
