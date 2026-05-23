@@ -144,6 +144,21 @@ def build_one(
     env["ANDROID_API_VERSION"] = str(api_level)
     env["PYO3_CROSS_LIB_DIR"] = str(prefix_lib)
     env["PYO3_CROSS_PYTHON_VERSION"] = py_full.rsplit(".", 1)[0]  # "3.13"
+
+    # Point Cargo + cc-rs at the NDK's clang-as-linker for this
+    # target.  Without this, ``cargo rustc`` falls back to the
+    # host's ``/usr/bin/ld`` (x86_64 GNU ld) to link aarch64
+    # object files, which fails with the obscure
+    #     /usr/bin/ld: ... Relocations in generic ELF (EM: 183)
+    #     /usr/bin/ld: ... error adding symbols: file in wrong format
+    # error.  ``EM: 183`` is the ELF machine number for AArch64 —
+    # host ld doesn't understand it.  The fix is documented in
+    # PyO3/maturin's Android cross-compile guide; PyO3/maturin-action
+    # sets these env vars automatically when given a *-linux-android
+    # target, but we invoke maturin directly via build.py so we
+    # have to wire them ourselves.
+    _set_ndk_linker_env(env, triple=triple, api_level=api_level)
+
     # ``-L native=`` so the linker finds libpython3.13.so even if
     # maturin's internal cross-config probes ``prefix/lib/python3.13``
     # instead (libpython lives one level up).
@@ -154,6 +169,7 @@ def build_one(
     print(f"  triple:  {triple}")
     print(f"  prefix:  {prefix_lib}")
     print(f"  api:     {api_level}")
+    print(f"  linker:  {env.get('CARGO_TARGET_' + _cargo_var(triple) + '_LINKER', '(unset)')}")
 
     # Some upstream pyproject configs ship maturin tooling specs.
     # Use whatever maturin the env has — CI pins via pip install.
@@ -177,6 +193,92 @@ def build_one(
     print(f"  cmd:     {' '.join(cmd)}")
     subprocess.run(cmd, cwd=source_dir, env=env, check=True)
     print(f"=== {name}/{abi} done ===")
+
+
+def _cargo_var(triple: str) -> str:
+    """Cargo env var suffix for a Rust target triple.
+
+    Cargo accepts ``CARGO_TARGET_<TRIPLE_UPPERCASE_UNDERSCORED>_LINKER``
+    etc.; this helper does the case + hyphen → underscore swap.
+    """
+    return triple.upper().replace("-", "_")
+
+
+def _ndk_host_arch() -> str:
+    """Detect the NDK prebuilt-host folder for the current OS.
+
+    NDK ships clang under
+    ``$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/<host>/bin/`` —
+    ``<host>`` is ``linux-x86_64`` on a GitHub ubuntu runner,
+    ``darwin-x86_64`` on macOS, ``windows-x86_64`` on Windows.
+    Returns the matching string.
+    """
+    p = sys.platform
+    if p == "linux":
+        return "linux-x86_64"
+    if p == "darwin":
+        return "darwin-x86_64"
+    if p == "win32":
+        return "windows-x86_64"
+    raise RuntimeError(f"unsupported NDK host platform: {p}")
+
+
+def _ndk_clang_name(triple: str, api_level: int) -> str:
+    """Per-triple clang binary name shipped by the NDK.
+
+    NDK uses ``<triple-without-vendor>-clang`` for most ABIs +
+    the API level baked in:
+
+      aarch64-linux-android24-clang
+      x86_64-linux-android24-clang
+      armv7a-linux-androideabi24-clang   (note: ``armv7a``, not ``armv7``)
+      i686-linux-android24-clang
+    """
+    if triple == "armv7-linux-androideabi":
+        # NDK names this one differently from the Rust target triple.
+        return f"armv7a-linux-androideabi{api_level}-clang"
+    return f"{triple}{api_level}-clang"
+
+
+def _set_ndk_linker_env(
+    env: dict[str, str], *, triple: str, api_level: int
+) -> None:
+    """Populate Cargo + cc-rs env vars so the toolchain uses the
+    NDK clang as both the linker and the C compiler for this
+    target.
+
+    Sets:
+      CARGO_TARGET_<TRIPLE>_LINKER       — Cargo invokes this to link
+      CARGO_TARGET_<TRIPLE>_AR           — Cargo invokes this to archive
+      CC_<triple>                        — cc-rs reads this when crates
+                                            need a C compiler at build
+      AR_<triple>                        — cc-rs archive
+    """
+    ndk_root = env.get("ANDROID_NDK_ROOT") or env.get("ANDROID_NDK_HOME")
+    if not ndk_root:
+        raise RuntimeError(
+            "ANDROID_NDK_ROOT / ANDROID_NDK_HOME unset; CI workflow "
+            "must run nttld/setup-ndk first"
+        )
+    host = _ndk_host_arch()
+    bin_dir = Path(ndk_root) / "toolchains" / "llvm" / "prebuilt" / host / "bin"
+    clang = bin_dir / _ndk_clang_name(triple, api_level)
+    ar = bin_dir / "llvm-ar"
+    if not clang.is_file():
+        raise RuntimeError(
+            f"NDK clang missing: {clang}.  NDK layout may have "
+            "changed; check $ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/"
+        )
+
+    cargo_suffix = _cargo_var(triple)
+    env[f"CARGO_TARGET_{cargo_suffix}_LINKER"] = str(clang)
+    env[f"CARGO_TARGET_{cargo_suffix}_AR"] = str(ar)
+    # cc-rs uses the unmodified triple in its env var names.
+    env[f"CC_{triple}"] = str(clang)
+    env[f"AR_{triple}"] = str(ar)
+    # Add the NDK bin to PATH so any plain ``clang`` / ``llvm-ar``
+    # lookups in build scripts find the NDK versions.
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
 
 
 def _checkout_upstream(
