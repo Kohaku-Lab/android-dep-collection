@@ -24,6 +24,7 @@ Usage::
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -150,6 +151,21 @@ def build_one(
             f"it does not exist under {source_dir}; the upstream "
             "tag may have moved its Python package."
         )
+
+    # ``disable_abi3``: opt-out for upstreams whose abi3 build is
+    # mis-tagged (the wheel claims abi3 stability but actually
+    # references non-stable-ABI CPython internals).  Stripping the
+    # ``abi3-pyXX`` feature from pyo3 deps in Cargo.toml + the
+    # ``py-limited-api`` setting from pyproject.toml makes maturin
+    # emit a ``cp313-cp313`` wheel instead of ``cpXX-abi3``.  We do
+    # this AFTER checkout but BEFORE invoking maturin so the patch
+    # is invisible to the upstream repo state (the workspace dir is
+    # discarded between builds).  Idempotent against re-builds of
+    # the cached checkout — re-applying the strip on already-stripped
+    # files is a no-op.
+    if wheel.get("disable_abi3"):
+        _strip_abi3_features(source_dir)
+
     prefix_lib = _stage_chaquopy_prefix(triple, py_full)
 
     env = os.environ.copy()
@@ -181,7 +197,9 @@ def build_one(
     print(f"  triple:  {triple}")
     print(f"  prefix:  {prefix_lib}")
     print(f"  api:     {api_level}")
-    print(f"  linker:  {env.get('CARGO_TARGET_' + _cargo_var(triple) + '_LINKER', '(unset)')}")
+    print(
+        f"  linker:  {env.get('CARGO_TARGET_' + _cargo_var(triple) + '_LINKER', '(unset)')}"
+    )
 
     # Some upstream pyproject configs ship maturin tooling specs.
     # Use whatever maturin the env has — CI pins via pip install.
@@ -206,6 +224,65 @@ def build_one(
     print(f"  cwd:     {build_dir}")
     subprocess.run(cmd, cwd=build_dir, env=env, check=True)
     print(f"=== {name}/{abi} done ===")
+
+
+_ABI3_FEATURE_RE = re.compile(r'"abi3(?:-py\d+)?"\s*,?\s*')
+_PY_LIMITED_API_RE = re.compile(r'^\s*py-limited-api\s*=\s*"[^"]*"\s*$', re.MULTILINE)
+
+
+def _strip_abi3_features(source_dir: Path) -> None:
+    """Remove ``abi3`` opt-ins from every Cargo.toml + pyproject.toml
+    under ``source_dir``.
+
+    Two stripping passes:
+
+    1. **Cargo.toml**: strip ``"abi3"`` and ``"abi3-pyXX"`` feature
+       strings from any features array.  pyo3's abi3 feature is what
+       triggers maturin's abi3 wheel-tag detection — removing it
+       makes maturin emit ``cp313-cp313`` instead.
+
+    2. **pyproject.toml**: strip ``py-limited-api = "..."`` from any
+       ``[tool.maturin]`` table.  Some upstreams (primp) set this
+       directly even when their Cargo features already imply abi3;
+       maturin honours it and tags the wheel ``abi3`` even after
+       Cargo.toml has been stripped.
+
+    Idempotent — re-applying on an already-patched tree is a no-op.
+    Logs each file that changed.
+    """
+    cargo_count = 0
+    for cargo_toml in source_dir.rglob("Cargo.toml"):
+        text = cargo_toml.read_text(encoding="utf-8")
+        new_text = _ABI3_FEATURE_RE.sub("", text)
+        # Tidy up any trailing ``, ]`` artefacts from removing the
+        # last item in a features array.  ``"foo", "abi3-py310"]``
+        # → ``"foo", ]`` → ``"foo"]``.
+        new_text = re.sub(r",\s*\]", "]", new_text)
+        if new_text != text:
+            cargo_toml.write_text(new_text, encoding="utf-8")
+            cargo_count += 1
+            print(
+                f"  patched abi3 features out of "
+                f"{cargo_toml.relative_to(source_dir)}"
+            )
+
+    pyproject_count = 0
+    for pyproject_toml in source_dir.rglob("pyproject.toml"):
+        text = pyproject_toml.read_text(encoding="utf-8")
+        new_text = _PY_LIMITED_API_RE.sub("", text)
+        if new_text != text:
+            pyproject_toml.write_text(new_text, encoding="utf-8")
+            pyproject_count += 1
+            print(
+                f"  patched py-limited-api out of "
+                f"{pyproject_toml.relative_to(source_dir)}"
+            )
+
+    if cargo_count == 0 and pyproject_count == 0:
+        print(
+            "  disable_abi3 set but no abi3 features / py-limited-api "
+            "found to strip (already patched, or upstream doesn't use abi3)"
+        )
 
 
 def _cargo_var(triple: str) -> str:
@@ -253,9 +330,7 @@ def _ndk_clang_name(triple: str, api_level: int) -> str:
     return f"{triple}{api_level}-clang"
 
 
-def _set_ndk_linker_env(
-    env: dict[str, str], *, triple: str, api_level: int
-) -> None:
+def _set_ndk_linker_env(env: dict[str, str], *, triple: str, api_level: int) -> None:
     """Populate Cargo + cc-rs env vars so the toolchain uses the
     NDK clang as both the linker and the C compiler for this
     target.
@@ -294,9 +369,7 @@ def _set_ndk_linker_env(
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
 
 
-def _checkout_upstream(
-    name: str, version: str, repo_url: str, tag: str
-) -> Path:
+def _checkout_upstream(name: str, version: str, repo_url: str, tag: str) -> Path:
     """Clone the upstream repo at ``tag`` into the workspace.
 
     Idempotent — if the dir already exists at the right commit,
@@ -350,18 +423,11 @@ def _stage_chaquopy_prefix(triple: str, py_full: str) -> Path:
     ``triple``.  Returns the path to the prefix's ``lib`` dir
     (where ``libpython3.13.so`` lives).
     """
-    cache_root = (
-        Path.home()
-        / ".cache"
-        / "android-dep-collection"
-        / "chaquopy-prefix"
-    )
+    cache_root = Path.home() / ".cache" / "android-dep-collection" / "chaquopy-prefix"
     cache_root.mkdir(parents=True, exist_ok=True)
     prefix_root = cache_root / f"{py_full}-{triple}"
     lib_dir = prefix_root / "prefix" / "lib"
-    libpython = (
-        lib_dir / f"libpython{py_full.rsplit('.', 1)[0]}.so"
-    )
+    libpython = lib_dir / f"libpython{py_full.rsplit('.', 1)[0]}.so"
     if libpython.is_file():
         return lib_dir
 

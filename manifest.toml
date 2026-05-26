@@ -100,11 +100,9 @@ upstream_tag = "v0.30.0"
 name = "primp"
 pypi_name = "primp"
 # 1.3.0 is the latest as of 2026-05.  Required by ddgs (web
-# search tool).  Ships as abi3 (cp38-abi3) so one wheel covers
-# Python 3.8+ — wheel-filename template is special-cased in
-# postcreate.py's _ANDROID_URL_REFS.
+# search tool).  primp wraps reqwest with rustls-tls — no system
+# OpenSSL needed.
 #
-# primp wraps reqwest with rustls-tls — no system OpenSSL needed.
 # The repo is a Cargo workspace: the root ``Cargo.toml`` declares
 # only ``[workspace]`` (no ``[package]``), so maturin's parse
 # fails at the root with ``missing field `package` ``.  The
@@ -113,7 +111,20 @@ pypi_name = "primp"
 # ``pyproject.toml`` + ``Cargo.toml``.  build.py chdir's into
 # this subdir before invoking maturin — same mechanism as the
 # huggingface monorepo entries.
+#
+# ``disable_abi3``: primp v1.3.0's source references
+# ``_Py_FalseStruct`` (the internal CPython symbol behind
+# ``Py_False``) which is NOT part of the stable abi3 ABI surface
+# — so the cp310-abi3 wheel maturin emits when ``abi3-py310`` is
+# enabled fails dlopen on the device with
+#     dlopen failed: cannot locate symbol "_Py_FalseStruct"
+#     referenced by ".../primp.abi3.so"
+# Stripping the abi3 feature makes maturin emit a cp313-cp313
+# wheel which links against Python 3.13's regular libpython.so
+# (where ``_Py_FalseStruct`` IS exported) — that loads cleanly.
+# See build.py:_strip_abi3_features for the patch mechanism.
 version = "1.3.0"
 upstream = "https://github.com/deedy5/primp"
 upstream_tag = "v1.3.0"
 subdir = "crates/primp-python"
+disable_abi3 = true
